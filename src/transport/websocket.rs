@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use futures_util::sink::SinkExt;
+use http;
 use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{
@@ -67,22 +68,59 @@ impl WebSocketTransport {
         // Set up WebSocket configuration
         let config = WebSocketConfig::default();
 
-        // Set up custom headers if provided
-        let mut request = tokio_tungstenite::tungstenite::handshake::client::Request::builder()
+        // Parse the URL to extract host information
+        let parsed_url =
+            Url::parse(url_str).map_err(|e| Error::Other(format!("Invalid URL: {}", e)))?;
+
+        // Extract host and port for the Host header
+        let host = format!(
+            "{}:{}",
+            parsed_url.host_str().unwrap_or("localhost"),
+            parsed_url
+                .port()
+                .unwrap_or(if parsed_url.scheme() == "wss" {
+                    443
+                } else {
+                    80
+                })
+        );
+
+        // Generate WebSocket key
+        let ws_key = tokio_tungstenite::tungstenite::handshake::client::generate_key();
+
+        // Build request with all required WebSocket headers
+        let mut request = http::Request::builder()
             .uri(url_str)
             .header(
                 "User-Agent",
                 format!("MCP Client Rust/{}", env!("CARGO_PKG_VERSION")),
-            );
+            )
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Host", host)
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", ws_key);
 
         // Add any custom headers
         if let Some(custom_headers) = headers {
             for (name, value) in custom_headers {
+                // Skip if it's a WebSocket protocol header that we've already set
+                if [
+                    "connection",
+                    "upgrade",
+                    "sec-websocket-key",
+                    "sec-websocket-version",
+                ]
+                .contains(&name.to_lowercase().as_str())
+                {
+                    continue;
+                }
                 request = request.header(name, value);
             }
         }
 
         let request = request
+            .method("GET")
             .body(())
             .map_err(|e| Error::Other(format!("Failed to build request: {}", e)))?;
 
