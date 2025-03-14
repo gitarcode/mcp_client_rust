@@ -2,19 +2,22 @@
 //!
 //! This SDK provides a Rust implementation of the Model Context Protocol (MCP), a protocol designed
 //! for communication between AI models and their runtime environments. The SDK supports both client
-//! and server implementations via a stdio-based transport layer.
+//! and server implementations via stdio and WebSocket transport layers.
 //!
 //! Located at https://github.com/darinkishore/mcp_client_rust
 //!
 //! ## Features
 //!
 //! - Full implementation of MCP protocol specification
-//! - Stdio transport layer
+//! - Stdio and WebSocket transport layers
+//! - Support for authentication headers in WebSocket transport
+//! - Automatic WebSocket ping/pong to keep connections alive
+//! - Configurable ping intervals for WebSocket connections
 //! - Async/await support using Tokio
 //! - Type-safe message handling
 //! - Comprehensive error handling
 //!
-//! ## Example
+//! ## Example (Stdio Transport)
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -28,7 +31,39 @@
 //!     let transport = StdioTransport::with_streams(stdin(), stdout())?;
 //!     
 //!     // Create the client with Arc-wrapped transport
-//!     let client = Client::new(Arc::new(transport));
+//!     let client = Client::new(Arc::new(transport), None, None);
+//!     
+//!     // Use the client...
+//!     
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Example (WebSocket Transport)
+//!
+//! ```no_run
+//! use std::{collections::HashMap, sync::Arc};
+//! use mcp_client_rs::client::Client;
+//! use mcp_client_rs::transport::websocket::WebSocketTransport;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Optional: Set up authentication headers
+//!     let mut headers = HashMap::new();
+//!     headers.insert("Authorization".to_string(), "Bearer token".to_string());
+//!     
+//!     // Create a WebSocket transport with default ping interval (30 seconds)
+//!     let transport = WebSocketTransport::with_headers("ws://localhost:8080", Some(headers)).await?;
+//!     
+//!     // Or with a custom ping interval to keep the connection alive
+//!     // let transport = WebSocketTransport::with_headers_and_ping_interval(
+//!     //     "ws://localhost:8080",
+//!     //     Some(headers),
+//!     //     15 // 15-second ping interval
+//!     // ).await?;
+//!     
+//!     // Create the client with Arc-wrapped transport
+//!     let client = Client::new(Arc::new(transport), None, None);
 //!     
 //!     // Use the client...
 //!     
@@ -48,7 +83,7 @@ pub mod error;
 pub mod protocol;
 /// Server module provides the MCP server implementation
 pub mod server;
-/// Transport layer implementations (stdio)
+/// Transport layer implementations (stdio, websocket)
 pub mod transport;
 /// Common types used throughout the SDK
 pub mod types;

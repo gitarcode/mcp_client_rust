@@ -149,3 +149,4 @@ pub trait Transport: Send + Sync + 'static {
 }
 
 pub mod stdio;
+pub mod websocket;
