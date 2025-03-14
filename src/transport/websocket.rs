@@ -49,7 +49,7 @@ impl Default for PingConfig {
 /// A transport that uses WebSockets for MCP communication.
 pub struct WebSocketTransport {
     /// A mutex-protected writer for sending messages.
-    writer: Arc<Mutex<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
+    writer: Arc<Mutex<futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>>>,
     /// A broadcast receiver for incoming messages.
     receiver: broadcast::Receiver<Result<Message, Error>>,
     /// Keep sender in scope to avoid dropping.
@@ -146,7 +146,9 @@ impl WebSocketTransport {
             .await
             .map_err(|e| Error::Other(format!("WebSocket connection failed: {}", e)))?;
 
-        let writer = Arc::new(Mutex::new(ws_stream));
+        // Split the stream into reader and writer parts
+        let (writer, mut reader) = ws_stream.split();
+        let writer = Arc::new(Mutex::new(writer));
 
         // Channel for incoming messages
         let (sender, receiver) = broadcast::channel(100);
@@ -161,9 +163,8 @@ impl WebSocketTransport {
         let sender_clone = sender.clone();
         tokio::spawn(async move {
             tracing::debug!("Starting WebSocket reader task");
-            let mut stream = writer_clone.lock().await;
 
-            while let Some(result) = stream.next().await {
+            while let Some(result) = reader.next().await {
                 match result {
                     Ok(msg) => {
                         if msg.is_text() || msg.is_binary() {
@@ -185,14 +186,15 @@ impl WebSocketTransport {
                             }
                         } else if msg.is_ping() {
                             // Automatically respond to ping with pong
-                            if let Err(e) = stream.send(WsMessage::Pong(msg.into_data())).await {
+                            let mut writer = writer_clone.lock().await;
+                            if let Err(e) = writer.send(WsMessage::Pong(msg.into_data())).await {
                                 tracing::error!("Error sending pong: {}", e);
                             }
                         } else if msg.is_close() {
                             tracing::debug!("WebSocket connection closed by server");
                             break;
                         }
-                        // Ignore pong messages, they're just confirmations of our pings
+                        // Ignore pong messages, they're handled by the ping task
                     }
                     Err(err) => {
                         tracing::error!("WebSocket read error: {}", err);
@@ -287,107 +289,59 @@ impl WebSocketTransport {
     }
 
     async fn setup_ping_task(
-        writer: Arc<Mutex<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
+        writer: Arc<Mutex<futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>>>,
         ping_stop: Arc<Mutex<bool>>,
         ping_config: PingConfig,
         ping_failures: Arc<Mutex<u32>>,
     ) {
-        tokio::spawn(async move {
-            let ping_interval = Duration::from_secs(ping_config.interval_secs);
-            let ping_timeout = Duration::from_secs(ping_config.timeout_secs);
+        let ping_interval = Duration::from_secs(ping_config.interval_secs);
 
-            tracing::debug!(
-                "Starting WebSocket ping task with interval: {}s, timeout: {}s",
-                ping_config.interval_secs,
-                ping_config.timeout_secs
-            );
+        tracing::debug!(
+            "Starting WebSocket ping task with interval: {}s",
+            ping_config.interval_secs
+        );
 
-            loop {
-                // Sleep for the ping interval
-                tokio::time::sleep(ping_interval).await;
+        loop {
+            // Sleep for the ping interval
+            tokio::time::sleep(ping_interval).await;
 
-                // Check if we should stop
-                {
-                    let stop = *ping_stop.lock().await;
-                    if stop {
-                        tracing::debug!("Stopping WebSocket ping task");
-                        break;
-                    }
-                }
-
-                // Send a ping
-                let ping_payload = rand::random::<u32>().to_be_bytes().to_vec();
-                tracing::trace!("Sending WebSocket ping with payload: {:?}", ping_payload);
-
-                let ping_result = {
-                    let mut writer_guard = writer.lock().await;
-                    writer_guard
-                        .send(WsMessage::Ping(ping_payload.clone().into()))
-                        .await
-                };
-
-                if let Err(e) = ping_result {
-                    tracing::warn!("Failed to send WebSocket ping: {}", e);
-
-                    let mut failures = ping_failures.lock().await;
-                    *failures += 1;
-
-                    if *failures >= ping_config.max_failures {
-                        tracing::error!(
-                            "Maximum ping failures reached ({}). Connection considered lost.",
-                            ping_config.max_failures
-                        );
-                        break;
-                    }
-
-                    continue;
-                }
-
-                // Wait for pong with timeout
-                let pong_received = {
-                    let mut writer_guard = writer.lock().await;
-                    match tokio::time::timeout(ping_timeout, writer_guard.next()).await {
-                        Ok(Some(Ok(msg))) => match msg {
-                            WsMessage::Pong(payload) => {
-                                tracing::trace!(
-                                    "Received WebSocket pong with payload: {:?}",
-                                    payload
-                                );
-                                payload == ping_payload
-                            }
-                            _ => false,
-                        },
-                        _ => false,
-                    }
-                };
-
-                // Update ping failures counter
-                {
-                    let mut failures = ping_failures.lock().await;
-                    if pong_received {
-                        // Reset counter on success
-                        *failures = 0;
-                    } else {
-                        *failures += 1;
-                        tracing::warn!(
-                            "WebSocket ping failed. Consecutive failures: {}/{}",
-                            *failures,
-                            ping_config.max_failures
-                        );
-
-                        if *failures >= ping_config.max_failures {
-                            tracing::error!(
-                                "Maximum ping failures reached ({}). Connection considered lost.",
-                                ping_config.max_failures
-                            );
-                            break;
-                        }
-                    }
+            // Check if we should stop
+            {
+                let stop = *ping_stop.lock().await;
+                if stop {
+                    tracing::debug!("Stopping WebSocket ping task");
+                    break;
                 }
             }
 
-            tracing::debug!("WebSocket ping task terminated");
-        });
+            // Send a ping
+            let ping_payload = rand::random::<u32>().to_be_bytes().to_vec();
+            tracing::trace!("Sending WebSocket ping with payload: {:?}", ping_payload);
+
+            let ping_result = {
+                let mut writer_guard = writer.lock().await;
+                writer_guard
+                    .send(WsMessage::Ping(ping_payload.clone().into()))
+                    .await
+            };
+
+            if let Err(e) = ping_result {
+                tracing::warn!("Failed to send WebSocket ping: {}", e);
+
+                let mut failures = ping_failures.lock().await;
+                *failures += 1;
+
+                if *failures >= ping_config.max_failures {
+                    tracing::error!(
+                        "Maximum ping failures reached ({}). Connection considered lost.",
+                        ping_config.max_failures
+                    );
+                    break;
+                }
+            }
+        }
+
+        tracing::debug!("WebSocket ping task terminated");
     }
 }
 
@@ -425,7 +379,7 @@ impl Transport for WebSocketTransport {
 
         // Then close the WebSocket connection with a proper close frame
         let mut writer = self.writer.lock().await;
-        match writer.close(None).await {
+        match writer.close().await {
             Ok(_) => {
                 tracing::debug!("WebSocket connection closed successfully");
                 Ok(())
