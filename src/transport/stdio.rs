@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use std::pin::Pin;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use crate::{
-    error::{Error, ErrorCode},
+    error::Error,
     transport::{Message, Transport},
 };
 

@@ -90,8 +90,8 @@ impl ClientBuilder {
     /// creates a `StdioTransport` from the subprocess's stdin/stdout,
     /// then returns a NOT initialized `Client`.
     /// You should then call `Client::initialize` to initialize the client.
-    /// 
-    /// Use `spawn_and_initialize` to do it in one step if you don't need to 
+    ///
+    /// Use `spawn_and_initialize` to do it in one step if you don't need to
     /// access logs or client details in case initialization fails.
     ///
     /// # Errors
@@ -122,14 +122,14 @@ impl ClientBuilder {
             tracing::error!(error = %e, "Failed to create temporary file for stderr");
             Error::Io(e.to_string())
         })?;
-        
+
         tracing::debug!(path = ?stderr_file.path(), "Created temporary file for stderr");
-        
+
         let stderr_fd = stderr_file.as_file().try_clone().map_err(|e| {
             tracing::error!(error = %e, "Failed to clone stderr file handle");
             Error::Io(e.to_string())
         })?;
-        
+
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr_fd));

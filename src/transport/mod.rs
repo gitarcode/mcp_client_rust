@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::pin::Pin;
 
-use crate::Error;
 use crate::protocol::{Notification, Request, Response};
+use crate::Error;
 
 /// A message that can be sent over a transport
 #[derive(Debug, Clone)]
@@ -15,16 +15,6 @@ pub enum Message {
     Request(Request),
     Response(Response),
     Notification(Notification),
-}
-
-impl Message {
-    fn message_type(&self) -> &'static str {
-        match self {
-            Message::Request(_) => "request",
-            Message::Response(_) => "response",
-            Message::Notification(_) => "notification",
-        }
-    }
 }
 
 // Custom visitor for more efficient deserialization

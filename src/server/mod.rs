@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     error::{Error, ErrorCode},
-    protocol::{Notification, Request, RequestId, Response, ResponseError},
+    protocol::{Request, Response, ResponseError},
     transport::{Message, Transport},
     types::{ClientCapabilities, Implementation, ServerCapabilities},
 };
@@ -146,9 +146,11 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use crate::{protocol::RequestId, Notification};
+
     use super::*;
     use async_trait::async_trait;
-    use futures::{Stream, StreamExt};
+    use futures::Stream;
     use std::{pin::Pin, time::Duration};
     use tokio::sync::{broadcast, mpsc};
 
@@ -602,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_message_handling() {
         // Create transport and server
-        let (transport, client_tx, mut client_rx) = MockTransport::new();
+        let (transport, client_tx, _client_rx) = MockTransport::new();
         let handler = TestHandler::new(
             Duration::from_millis(100),
             Duration::from_millis(100),

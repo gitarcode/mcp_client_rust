@@ -1,21 +1,19 @@
 use futures::StreamExt;
-use serde_json::Value;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 use crate::{
-    ReadResourceResult,
     error::{Error, ErrorCode},
     protocol::{Notification, Request, RequestId},
     transport::{Message, Transport},
     types::{
-        CallToolRequest, CallToolResult, ClientCapabilities, CompleteRequest, CompleteResult,
-        GetPromptResult, Implementation, InitializeResult, ListPromptsResult, ListResourcesResult,
-        ListToolsResult, ServerCapabilities, Tool,
+        CallToolRequest, CallToolResult, ClientCapabilities, Implementation, InitializeResult,
+        ListResourcesResult, ListToolsResult, ServerCapabilities, Tool,
     },
+    ReadResourceResult,
 };
 
 mod builder;
@@ -36,8 +34,6 @@ pub struct Client {
     request_counter: Arc<RwLock<i64>>,
     /// An MPSC receiver for reading incoming responses from the transport.
     response_receiver: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Message>>>,
-    /// An MPSC sender for sending responses from the transport handler to this client.
-    response_sender: tokio::sync::mpsc::UnboundedSender<Message>,
     /// To handle shutdown, in stdin/stdout case we also need to shut down subprocess
     subprocess: Option<tokio::process::Child>,
     /// Temporary file for stderr output - will be automatically deleted when dropped
@@ -47,14 +43,17 @@ pub struct Client {
 impl Client {
     /// Creates a new MCP client with the given transport.
     /// This does not perform initialization. You typically call `client.initialize(...)` next.
-    pub fn new(transport: Arc<dyn Transport>, subprocess: Option<Child>, stderr_file: Option<NamedTempFile>) -> Self {
+    pub fn new(
+        transport: Arc<dyn Transport>,
+        subprocess: Option<Child>,
+        stderr_file: Option<NamedTempFile>,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let client = Self {
             transport: transport.clone(),
             server_capabilities: Arc::new(RwLock::new(None)),
             request_counter: Arc::new(RwLock::new(0)),
             response_receiver: Arc::new(Mutex::new(rx)),
-            response_sender: tx.clone(),
             subprocess,
             stderr_file,
         };
@@ -148,7 +147,7 @@ impl Client {
 
         // Wait for a matching response (by request ID) or a 30s timeout
         let mut rx = self.response_receiver.lock().await;
-        
+
         tokio::select! {
             // Branch 1: Handle the message receiving logic
             result = async {
@@ -189,12 +188,12 @@ impl Client {
                     "Connection closed while waiting for response",
                 ))
             } => result,
-            
+
             // Branch 2: Periodically check if the process is still alive, or timeout after 30s
             result = async {
                 for _ in 1..=100 {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    
+
                     if let Some(process) = &mut self.subprocess {
                         match process.try_wait() {
                             Ok(None) => continue,
@@ -207,7 +206,7 @@ impl Client {
                         }
                     }
                 }
-                
+
                 tracing::error!("Request to '{}' timed out after 30 seconds", method);
                 Err(Error::Other(format!(
                     "Request to '{method}' timed out after 30 seconds"
@@ -244,11 +243,11 @@ impl Client {
 
     async fn perform_shutdown(
         transport: Arc<dyn Transport>,
-        child: &mut Option<Child>
+        child: &mut Option<Child>,
     ) -> Result<(), Error> {
         tracing::info!("Shutting down MCP client");
         transport.close().await?;
-        
+
         if let Some(child) = child.as_mut() {
             const TIMEOUT: u64 = 2;
             if let Ok(None) = child.try_wait() {
@@ -256,7 +255,10 @@ impl Client {
                 let _ = timeout(Duration::from_secs(TIMEOUT), child.wait()).await;
             }
             if let Ok(None) = child.try_wait() {
-                tracing::info!("Have an associated subprocess, sending kill and waiting {}s", TIMEOUT);
+                tracing::info!(
+                    "Have an associated subprocess, sending kill and waiting {}s",
+                    TIMEOUT
+                );
                 let _ = child.start_kill();
                 let _ = timeout(Duration::from_secs(TIMEOUT), child.wait()).await;
             }
@@ -350,20 +352,20 @@ impl Client {
         if let Some(file) = &self.stderr_file {
             let path = file.path();
             let line_count = tail_lines.unwrap_or(100);
-            
-            let file = tokio::fs::File::open(path).await?;       
+
+            let file = tokio::fs::File::open(path).await?;
             let reader = tokio::io::BufReader::new(file);
 
             let mut lines_stream = tokio::io::AsyncBufReadExt::lines(reader);
             let mut last_lines = std::collections::VecDeque::with_capacity(line_count);
-            
+
             while let Some(line) = lines_stream.next_line().await? {
                 if last_lines.len() >= line_count {
                     last_lines.pop_front();
                 }
                 last_lines.push_back(line);
             }
-            
+
             Ok(last_lines.into_iter().collect::<Vec<_>>().join("\n"))
         } else {
             Err(Error::Other("No stderr file available".to_string()))
@@ -376,7 +378,7 @@ impl Drop for Client {
     fn drop(&mut self) {
         let mut subprocess = self.subprocess.take();
         let transport = self.transport.clone();
-        
+
         tokio::spawn(async move {
             if let Err(e) = Client::perform_shutdown(transport, &mut subprocess).await {
                 tracing::error!("Error during shutdown in drop: {e}");

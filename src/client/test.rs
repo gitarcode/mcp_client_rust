@@ -1,9 +1,6 @@
 use crate::client::builder::ClientBuilder;
 use crate::error::Error;
-use crate::types::{
-    CallToolResult, ClientCapabilities, ListToolsResult, MessageContent, ReadResourceResult,
-    ServerCapabilities, Tool,
-};
+use crate::types::{MessageContent, ServerCapabilities};
 use tokio;
 
 /// Creates a test client by spawning the `uvx` process with the `notes-simple` argument.
@@ -29,7 +26,7 @@ async fn test_notes_simple_basic_functionality() -> Result<(), Error> {
 /// Test listing tools and verifying the returned schema.
 #[tokio::test]
 async fn test_list_tools_schema() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let tools_result = client.list_tools().await?;
     assert!(
         !tools_result.tools.is_empty(),
@@ -79,7 +76,7 @@ async fn test_list_tools_schema() -> Result<(), Error> {
 /// Tests calling the 'add-note' tool successfully.
 #[tokio::test]
 async fn test_call_add_note_success() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let arguments = serde_json::json!({
         "name": "my-test-note",
         "content": "This is a test note"
@@ -105,7 +102,7 @@ async fn test_call_add_note_success() -> Result<(), Error> {
 /// Tests calling the 'add-note' tool with missing arguments to ensure it returns a *tool-level* error.
 #[tokio::test]
 async fn test_call_add_note_missing_args() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let arguments = serde_json::json!({ "name": "only-name-provided" });
 
     let bad_result = client.call_tool("add-note", arguments).await;
@@ -120,7 +117,7 @@ async fn test_call_add_note_missing_args() -> Result<(), Error> {
 /// Tests calling the 'add-note' tool with invalid argument types (e.g. numeric 'content').
 #[tokio::test]
 async fn test_call_add_note_wrong_types() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let arguments = serde_json::json!({
         "name": "numeric-content",
         "content": 123
@@ -138,7 +135,7 @@ async fn test_call_add_note_wrong_types() -> Result<(), Error> {
 /// Tests retrieving a list of resources after adding a note, ensuring the new note is discoverable.
 #[tokio::test]
 async fn test_resource_list_after_adding_note() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let arguments = serde_json::json!({
         "name": "listed-note",
         "content": "Note content"
@@ -170,7 +167,7 @@ async fn test_resource_list_after_adding_note() -> Result<(), Error> {
 /// Tests reading the content of a note that was just created, verifying we parse the returned JSON properly.
 #[tokio::test]
 async fn test_read_resource_of_added_note() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let note_name = "readable-note";
     let content_str = "Hello, I am a readable note";
     let arguments = serde_json::json!({
@@ -200,7 +197,7 @@ async fn test_read_resource_of_added_note() -> Result<(), Error> {
 /// Tests that calling a non-existent tool returns a tool-level error, which we interpret as an error in the client.
 #[tokio::test]
 async fn test_call_tool_invalid_name() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     let bad_result = client
         .call_tool("this_tool_does_not_exist", serde_json::json!({}))
         .await;
@@ -214,7 +211,7 @@ async fn test_call_tool_invalid_name() -> Result<(), Error> {
 /// Tests that we can handle the list_changed notification the server might emit after adding a resource.
 #[tokio::test]
 async fn test_resource_list_changed_notification_handling() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
 
     let arguments = serde_json::json!({
         "name": "note-with-notification",
@@ -234,7 +231,7 @@ async fn test_resource_list_changed_notification_handling() -> Result<(), Error>
 /// Additional test for ping requests, ensuring the server responds quickly with an empty result.
 #[tokio::test]
 async fn test_ping_request() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     // The server may or may not implement ping, but let's attempt anyway:
     // If unimplemented, we might get a method-not-found error. Let's check we handle it gracefully.
     let ping_result = client.request("ping", None).await;
@@ -257,7 +254,7 @@ async fn test_ping_request() -> Result<(), Error> {
 /// Additional test for logging, if the server implements it. We'll set the log level and see if it returns an OK result.
 #[tokio::test]
 async fn test_set_log_level() -> Result<(), Error> {
-    let client = create_test_client().await?;
+    let mut client = create_test_client().await?;
     // The server might not implement logging. Let's just attempt "logging/setLevel".
     let set_result = client
         .request(
