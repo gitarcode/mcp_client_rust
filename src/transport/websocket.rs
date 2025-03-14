@@ -9,6 +9,7 @@ use tokio_tungstenite::{
     tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
 };
 use url::Url;
+use rand;
 
 use crate::{
     error::Error,
@@ -17,6 +18,33 @@ use crate::{
 
 /// Default ping interval in seconds
 const DEFAULT_PING_INTERVAL_SECS: u64 = 30;
+
+/// Default ping timeout in seconds
+const DEFAULT_PING_TIMEOUT_SECS: u64 = 10;
+
+/// Default maximum number of consecutive ping failures before considering connection lost
+const DEFAULT_MAX_PING_FAILURES: u32 = 3;
+
+/// Configuration for WebSocket ping behavior
+#[derive(Debug, Clone)]
+pub struct PingConfig {
+    /// Interval between pings in seconds
+    pub interval_secs: u64,
+    /// Maximum time to wait for a pong response in seconds
+    pub timeout_secs: u64,
+    /// Maximum consecutive ping failures before considering connection lost
+    pub max_failures: u32,
+}
+
+impl Default for PingConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: DEFAULT_PING_INTERVAL_SECS,
+            timeout_secs: DEFAULT_PING_TIMEOUT_SECS,
+            max_failures: DEFAULT_MAX_PING_FAILURES,
+        }
+    }
+}
 
 /// A transport that uses WebSockets for MCP communication.
 pub struct WebSocketTransport {
@@ -28,6 +56,10 @@ pub struct WebSocketTransport {
     _sender: broadcast::Sender<Result<Message, Error>>,
     /// Flag to track if we should stop the ping task
     ping_stop: Arc<Mutex<bool>>,
+    /// Configuration for ping behavior
+    ping_config: PingConfig,
+    /// Track consecutive ping failures
+    ping_failures: Arc<Mutex<u32>>,
 }
 
 impl WebSocketTransport {
@@ -48,19 +80,6 @@ impl WebSocketTransport {
     pub async fn with_headers(
         url: impl AsRef<str>,
         headers: Option<HashMap<String, String>>,
-    ) -> Result<Self, Error> {
-        Self::with_headers_and_ping_interval(url, headers, DEFAULT_PING_INTERVAL_SECS).await
-    }
-
-    /// Creates a new WebSocketTransport with custom headers and ping interval.
-    ///
-    /// # Errors
-    ///
-    /// Returns an `Error` if the connection fails.
-    pub async fn with_headers_and_ping_interval(
-        url: impl AsRef<str>,
-        headers: Option<HashMap<String, String>>,
-        ping_interval_secs: u64,
     ) -> Result<Self, Error> {
         let url_str = url.as_ref();
         Url::parse(url_str).map_err(|e| Error::Other(format!("Invalid URL: {}", e)))?;
@@ -136,6 +155,8 @@ impl WebSocketTransport {
 
         // Flag to control the ping task
         let ping_stop = Arc::new(Mutex::new(false));
+        let ping_failures = Arc::new(Mutex::new(0));
+        let ping_config = PingConfig::default();
 
         // Start a task to read from the WebSocket and send to the channel
         let writer_clone = writer.clone();
@@ -185,46 +206,19 @@ impl WebSocketTransport {
             }
             tracing::debug!("WebSocket reader task terminated");
         });
-
-        // Start a background task for sending ping frames periodically
+        
+        // Start the ping task
         let writer_for_ping = writer.clone();
         let ping_stop_clone = ping_stop.clone();
+        let ping_failures_clone = ping_failures.clone();
+        let ping_config_clone = ping_config.clone();
         tokio::spawn(async move {
-            let ping_interval = Duration::from_secs(ping_interval_secs);
-            tracing::debug!(
-                "Starting WebSocket ping task with interval of {:?}",
-                ping_interval
-            );
-
-            loop {
-                tokio::time::sleep(ping_interval).await;
-
-                // Check if we should stop sending pings
-                let should_stop = {
-                    let stop = ping_stop_clone.lock().await;
-                    *stop
-                };
-
-                if should_stop {
-                    tracing::debug!("Stopping WebSocket ping task");
-                    break;
-                }
-
-                // Send a ping frame
-                let mut writer = writer_for_ping.lock().await;
-                match writer
-                    .send(WsMessage::Ping(tokio_tungstenite::tungstenite::Bytes::new()))
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::trace!("Sent WebSocket ping");
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to send ping: {}", e);
-                        break;
-                    }
-                }
-            }
+            Self::setup_ping_task(
+                writer_for_ping,
+                ping_stop_clone,
+                ping_config_clone,
+                ping_failures_clone
+            ).await;
         });
 
         Ok(WebSocketTransport {
@@ -232,6 +226,8 @@ impl WebSocketTransport {
             receiver,
             _sender: sender,
             ping_stop,
+            ping_config,
+            ping_failures,
         })
     }
 
@@ -267,6 +263,121 @@ impl WebSocketTransport {
         let url = format!("{}://{}:{}", scheme, host.as_ref(), port);
         Self::with_headers_and_ping_interval(url, headers, ping_interval_secs).await
     }
+
+    /// Sets the ping configuration for the WebSocket
+    pub fn with_ping_config(mut self, config: PingConfig) -> Self {
+        self.ping_config = config;
+        self
+    }
+
+    /// Creates a new WebSocketTransport with custom headers and ping interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if the connection fails.
+    pub async fn with_headers_and_ping_interval(
+        url: impl AsRef<str>,
+        headers: Option<HashMap<String, String>>,
+        ping_interval_secs: u64,
+    ) -> Result<Self, Error> {
+        let mut transport = Self::with_headers(url, headers).await?;
+        
+        // Update just the interval in the ping config
+        transport.ping_config.interval_secs = ping_interval_secs;
+        
+        Ok(transport)
+    }
+
+    async fn setup_ping_task(
+        writer: Arc<Mutex<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
+        ping_stop: Arc<Mutex<bool>>,
+        ping_config: PingConfig,
+        ping_failures: Arc<Mutex<u32>>,
+    ) {
+        tokio::spawn(async move {
+            let ping_interval = Duration::from_secs(ping_config.interval_secs);
+            let ping_timeout = Duration::from_secs(ping_config.timeout_secs);
+            
+            tracing::debug!("Starting WebSocket ping task with interval: {}s, timeout: {}s", 
+                           ping_config.interval_secs, ping_config.timeout_secs);
+            
+            loop {
+                // Sleep for the ping interval
+                tokio::time::sleep(ping_interval).await;
+                
+                // Check if we should stop
+                {
+                    let stop = *ping_stop.lock().await;
+                    if stop {
+                        tracing::debug!("Stopping WebSocket ping task");
+                        break;
+                    }
+                }
+                
+                // Send a ping
+                let ping_payload = rand::random::<u32>().to_be_bytes().to_vec();
+                tracing::trace!("Sending WebSocket ping with payload: {:?}", ping_payload);
+                
+                let ping_result = {
+                    let mut writer_guard = writer.lock().await;
+                    writer_guard.send(WsMessage::Ping(ping_payload.clone().into())).await
+                };
+                
+                if let Err(e) = ping_result {
+                    tracing::warn!("Failed to send WebSocket ping: {}", e);
+                    
+                    let mut failures = ping_failures.lock().await;
+                    *failures += 1;
+                    
+                    if *failures >= ping_config.max_failures {
+                        tracing::error!("Maximum ping failures reached ({}). Connection considered lost.", 
+                                       ping_config.max_failures);
+                        break;
+                    }
+                    
+                    continue;
+                }
+                
+                // Wait for pong with timeout
+                let pong_received = {
+                    let mut writer_guard = writer.lock().await;
+                    match tokio::time::timeout(ping_timeout, writer_guard.next()).await {
+                        Ok(Some(Ok(msg))) => {
+                            match msg {
+                                WsMessage::Pong(payload) => {
+                                    tracing::trace!("Received WebSocket pong with payload: {:?}", payload);
+                                    payload == ping_payload
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    }
+                };
+                
+                // Update ping failures counter
+                {
+                    let mut failures = ping_failures.lock().await;
+                    if pong_received {
+                        // Reset counter on success
+                        *failures = 0;
+                    } else {
+                        *failures += 1;
+                        tracing::warn!("WebSocket ping failed. Consecutive failures: {}/{}", 
+                                     *failures, ping_config.max_failures);
+                        
+                        if *failures >= ping_config.max_failures {
+                            tracing::error!("Maximum ping failures reached ({}). Connection considered lost.", 
+                                          ping_config.max_failures);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            tracing::debug!("WebSocket ping task terminated");
+        });
+    }
 }
 
 #[async_trait]
@@ -301,12 +412,18 @@ impl Transport for WebSocketTransport {
             *stop = true;
         }
 
-        // Then close the WebSocket connection
+        // Then close the WebSocket connection with a proper close frame
         let mut writer = self.writer.lock().await;
-        writer
-            .close(None)
-            .await
-            .map_err(|e| Error::Other(format!("Error closing WebSocket: {}", e)))?;
-        Ok(())
+        match writer.close(None).await {
+            Ok(_) => {
+                tracing::debug!("WebSocket connection closed successfully");
+                Ok(())
+            },
+            Err(e) => {
+                tracing::warn!("Error during WebSocket close: {}", e);
+                // Continue despite error, as we're closing anyway
+                Ok(())
+            }
+        }
     }
 }
