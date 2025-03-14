@@ -212,7 +212,10 @@ impl WebSocketTransport {
 
                 // Send a ping frame
                 let mut writer = writer_for_ping.lock().await;
-                match writer.send(WsMessage::Ping(vec![])).await {
+                match writer
+                    .send(WsMessage::Ping(tokio_tungstenite::tungstenite::Bytes::new()))
+                    .await
+                {
                     Ok(_) => {
                         tracing::trace!("Sent WebSocket ping");
                     }
@@ -273,7 +276,7 @@ impl Transport for WebSocketTransport {
         let json = serde_json::to_string(&message)?;
         let mut writer = self.writer.lock().await;
         writer
-            .send(WsMessage::Text(json))
+            .send(WsMessage::Text(json.into()))
             .await
             .map_err(|e| Error::Other(format!("WebSocket send error: {}", e)))?;
         Ok(())
