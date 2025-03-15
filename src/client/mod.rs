@@ -1,10 +1,10 @@
+use futures::Stream;
 use futures::StreamExt;
 use std::{pin::Pin, sync::Arc};
 use tempfile::NamedTempFile;
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{timeout, Duration};
-use futures::Stream;
 
 use crate::{
     error::{Error, ErrorCode},
@@ -127,7 +127,7 @@ impl Client {
             *state = ConnectionState::Connected;
         }
 
-        tracing::info!(?implementation, "Initializing MCP client");
+        tracing::debug!(?implementation, "Initializing MCP client");
 
         let params = serde_json::json!({
             "clientInfo": implementation,
@@ -151,12 +151,12 @@ impl Client {
         {
             let mut initialized = self.initialized.write().await;
             *initialized = true;
-            
+
             let mut state = self.connection_state.write().await;
             *state = ConnectionState::Initialized;
         }
 
-        tracing::info!("MCP client initialization complete");
+        tracing::debug!("MCP client initialization complete");
         Ok(init_result)
     }
 
@@ -293,16 +293,18 @@ impl Client {
 
         // Wait for shutdown/ack notification with timeout
         let timeout_duration = Duration::from_secs(5);
-        match tokio::time::timeout(
-            timeout_duration,
-            self.wait_for_notification("shutdown/ack"),
-        ).await {
+        match tokio::time::timeout(timeout_duration, self.wait_for_notification("shutdown/ack"))
+            .await
+        {
             Ok(result) => {
                 tracing::debug!("Received shutdown/ack notification");
                 result
-            },
+            }
             Err(_) => {
-                tracing::warn!("Shutdown ack notification timed out after {:?}", timeout_duration);
+                tracing::warn!(
+                    "Shutdown ack notification timed out after {:?}",
+                    timeout_duration
+                );
                 // Continue with cleanup even without ack
                 Ok(())
             }
@@ -314,7 +316,7 @@ impl Client {
             *initialized = false;
         }
 
-        tracing::info!("MCP client shutdown complete");
+        tracing::debug!("MCP client shutdown complete");
         Ok(())
     }
 
@@ -333,11 +335,11 @@ impl Client {
         {
             let mut state = self.connection_state.write().await;
             *state = ConnectionState::Disconnected;
-            
+
             let mut initialized = self.initialized.write().await;
             *initialized = false;
         }
-        
+
         // Close the transport
         self.transport.close().await
     }
@@ -459,7 +461,7 @@ impl Drop for Client {
             if let Err(e) = transport.close().await {
                 tracing::error!("Error during transport close in drop: {e}");
             }
-            
+
             // If there's a subprocess, attempt to kill it
             if let Some(child) = &mut subprocess {
                 let _ = child.start_kill();
