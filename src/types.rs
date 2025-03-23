@@ -346,6 +346,17 @@ pub struct CallToolResult {
 pub struct CallToolRequest {
     pub name: String,
     pub arguments: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(flatten)]
+    pub metadata: Option<CallToolArgs>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallToolArgs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
