@@ -286,6 +286,7 @@ impl Client {
         let request = CallToolRequest {
             name: name.to_string(),
             arguments,
+            metadata:  None,
         };
 
         let response = self
