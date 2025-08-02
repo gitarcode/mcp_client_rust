@@ -59,7 +59,10 @@ where
                         }
                         let message = match serde_json::from_str::<Message>(trimmed) {
                             Ok(m) => Ok(m),
-                            Err(err) => Err(Error::Serialization(err.to_string())),
+                            Err(err) => {
+                                tracing::warn!(?err, "Message read error");
+                                continue
+                            },
                         };
 
                         let _ = sender_clone.send(message);
