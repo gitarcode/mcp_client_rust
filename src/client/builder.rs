@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::process::Command;
 
@@ -24,6 +25,10 @@ pub struct ClientBuilder {
     capabilities: Option<ClientCapabilities>,
     /// Environment variables for the subprocess.
     env: HashMap<String, String>,
+    /// How long `spawn_and_initialize` waits for the `initialize` response. Defaults to 30
+    /// seconds (see [`Client::initialize`]) when not set — override for commands whose first
+    /// run needs to install something (`npx`, `uvx`) before they can speak the protocol.
+    handshake_timeout: Option<Duration>,
 }
 
 impl ClientBuilder {
@@ -36,7 +41,18 @@ impl ClientBuilder {
             implementation: None,
             capabilities: None,
             env: HashMap::new(),
+            handshake_timeout: None,
         }
+    }
+
+    /// Overrides how long `spawn_and_initialize` waits for the `initialize` response.
+    ///
+    /// Only the handshake is affected — requests made after the server is up
+    /// (`list_tools`, `call_tool`) keep their own independent timeout.
+    pub fn handshake_timeout(mut self, timeout: Duration) -> Self {
+        tracing::trace!(?timeout, "Setting handshake timeout for ClientBuilder");
+        self.handshake_timeout = Some(timeout);
+        self
     }
 
     pub fn arg(mut self, arg: &str) -> Self {
@@ -181,10 +197,23 @@ impl ClientBuilder {
     ///
     /// Returns an error if the command cannot be spawned, or if initialization fails.
     pub async fn spawn_and_initialize(self) -> Result<Client, Error> {
+        let handshake_timeout = self.handshake_timeout;
         let (mut client, implementation, capabilities) = self.spawn().await?;
 
-        tracing::debug!(?implementation, ?capabilities, "Initializing client");
-        client.initialize(implementation, capabilities).await?;
+        tracing::debug!(
+            ?implementation,
+            ?capabilities,
+            ?handshake_timeout,
+            "Initializing client"
+        );
+        match handshake_timeout {
+            Some(timeout) => {
+                client
+                    .initialize_with_timeout(implementation, capabilities, timeout)
+                    .await?
+            }
+            None => client.initialize(implementation, capabilities).await?,
+        };
 
         tracing::info!("MCP client successfully spawned and initialized");
         Ok(client)

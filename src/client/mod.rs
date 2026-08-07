@@ -106,17 +106,38 @@ impl Client {
         client
     }
 
+    /// Initializes the client, waiting up to 30 seconds for the server's response.
+    ///
+    /// Use [`Client::initialize_with_timeout`] for servers whose startup command needs
+    /// longer than that — e.g. `npx`/`uvx` installing a package on first run.
+    pub async fn initialize(
+        &mut self,
+        implementation: Implementation,
+        capabilities: ClientCapabilities,
+    ) -> Result<InitializeResult, Error> {
+        self.initialize_with_timeout(implementation, capabilities, Duration::from_secs(30))
+            .await
+    }
+
     /// Initializes the client by sending an "initialize" request containing:
     /// - client implementation info
     /// - client capabilities
     /// - protocol version
     ///
+    /// `timeout` bounds only this handshake — it does not change the 30-second timeout
+    /// applied to requests made after initialization (`list_tools`, `call_tool`, etc. via
+    /// [`Client::request`]). Startup cost (installing a package, cold-starting a runtime)
+    /// is a one-time cost that can legitimately run longer than a single steady-state call
+    /// should be allowed to hang for; keeping the two independent means a slow install
+    /// doesn't have to buy every later call room to hang too.
+    ///
     /// On success, updates the client's `server_capabilities` field and sends an
     /// `initialized` notification to the server.
-    pub async fn initialize(
+    pub async fn initialize_with_timeout(
         &mut self,
         implementation: Implementation,
         capabilities: ClientCapabilities,
+        timeout: Duration,
     ) -> Result<InitializeResult, Error> {
         // Set connection state to Connected
         {
@@ -127,7 +148,7 @@ impl Client {
             *state = ConnectionState::Connected;
         }
 
-        tracing::debug!(?implementation, "Initializing MCP client");
+        tracing::debug!(?implementation, ?timeout, "Initializing MCP client");
 
         let params = serde_json::json!({
             "clientInfo": implementation,
@@ -135,7 +156,9 @@ impl Client {
             "protocolVersion": crate::LATEST_PROTOCOL_VERSION,
         });
 
-        let response = self.request("initialize", Some(params)).await?;
+        let response = self
+            .request_with_timeout("initialize", Some(params), timeout)
+            .await?;
         let init_result: InitializeResult = serde_json::from_value(response)?;
 
         tracing::debug!(?init_result, "Received initialization response");
@@ -172,19 +195,40 @@ impl Client {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, Error> {
+        self.request_with_timeout(method, params, Duration::from_secs(30))
+            .await
+    }
+
+    /// Sends a request to the server with the given method and optional parameters,
+    /// then waits up to `timeout` for a matching response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transport fails, the server returns an error,
+    /// or no response is received within `timeout`.
+    pub async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, Error> {
         // Increment request ID
         let mut counter = self.request_counter.write().await;
         *counter += 1;
         let id = RequestId::Number(*counter);
 
         let request = Request::new(method, params, id.clone());
-        tracing::debug!(?request, "Sending MCP request");
+        tracing::debug!(?request, ?timeout, "Sending MCP request");
 
         // Send request
         self.transport.send(Message::Request(request)).await?;
 
-        // Wait for a matching response (by request ID) or a 30s timeout
+        // Wait for a matching response (by request ID) or the timeout
         let mut rx = self.response_receiver.lock().await;
+
+        // Poll process liveness in increments no larger than 300ms, so a process that exits
+        // early is still caught promptly even when `timeout` is large.
+        let liveness_checks = (timeout.as_millis() / 300).max(1) as u32;
 
         tokio::select! {
             // Branch 1: Handle the message receiving logic
@@ -227,9 +271,9 @@ impl Client {
                 ))
             } => result,
 
-            // Branch 2: Periodically check if the process is still alive, or timeout after 30s
+            // Branch 2: Periodically check if the process is still alive, or time out
             result = async {
-                for _ in 1..=100 {
+                for _ in 1..=liveness_checks {
                     tokio::time::sleep(Duration::from_millis(300)).await;
 
                     if let Some(process) = &mut self.subprocess {
@@ -245,9 +289,9 @@ impl Client {
                     }
                 }
 
-                tracing::error!("Request to '{}' timed out after 30 seconds", method);
+                tracing::error!("Request to '{}' timed out after {:?}", method, timeout);
                 Err(Error::Other(format!(
-                    "Request to '{method}' timed out after 30 seconds"
+                    "Request to '{method}' timed out after {timeout:?}"
                 )))
             } => result,
         }

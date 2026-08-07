@@ -274,3 +274,51 @@ async fn test_set_log_level() -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// `handshake_timeout` bounds only the `initialize` wait, and is independent of the
+/// steady-state per-request timeout: `sleep` never speaks the protocol, so the process stays
+/// alive and never exits, which means the only way this returns in well under 30 seconds is
+/// if the override is actually being used instead of the default.
+#[tokio::test]
+async fn test_handshake_timeout_overrides_the_default() {
+    let start = std::time::Instant::now();
+
+    let result = ClientBuilder::new("sleep")
+        .arg("100")
+        .handshake_timeout(std::time::Duration::from_millis(500))
+        .spawn_and_initialize()
+        .await;
+
+    let elapsed = start.elapsed();
+    assert!(result.is_err(), "sleep never responds, so this must fail");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 500ms override to apply, took {elapsed:?}"
+    );
+}
+
+/// Without an explicit override, `request()` keeps its historical 30-second default —
+/// callers that never opt into a custom timeout must see no behavior change. `sleep` never
+/// responds and never exits within our 2-second probe window, so a plain `request()` call
+/// should still be pending — unlike the 500ms-override test above, which resolves quickly.
+#[tokio::test]
+async fn test_request_default_timeout_is_unchanged_by_handshake_timeout() {
+    let (mut client, _implementation, _capabilities) = ClientBuilder::new("sleep")
+        .arg("100")
+        .spawn()
+        .await
+        .expect("spawning sleep should not fail");
+
+    let start = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.request("ping", None),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "request() should still be waiting well before the 30s default, elapsed {:?}",
+        start.elapsed()
+    );
+}
